@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Document</title>
+    <script src="http://group.testing.amap.com/jiajiejie.jj/cms/z.js"></script>
+    <script>
+    // window.Promise = null;
+    </script>
+    <script src="velocity.js"></script>
+    <script src="velocity.ui.js"></script>
+    <style>
+    #el {
+        width: 100px; height: 100px;
+        background: orange;
+    }
+    </style>
+</head>
+<body>
+    <div id="el"></div>
+
+    <script>
+    var $el = $('#el');
+    var seq = [{
+        e: $el,
+        p: {
+            translateX: 100
+        },
+        o: {
+            duration: 500
+        }
+    }, {
+        e: $el,
+        p: {
+            translateX: 200
+        },
+        o: {
+            duration: 500
+        }
+    }, {
+        e: $el,
+        p: {
+            translateX: 300
+        },
+        o: {
+            duration: 500
+        }
+    }];
+
+//    $.Velocity.RunSequence(seq);
+//    setTimeout(function() {
+//        $el.velocity('pause');
+//        setTimeout(function() {
+//            $el.velocity('resume');
+//        }, 200);
+//    }, 800);
+	// 是真正意义的循环（自带reverse），而不是css中的重复
+//	$.Velocity.debug = 1;
+//	var ts = +new Date;
+//	$el.velocity({
+//		translateX: 500,
+//		'tap-highlight-color': 'red'
+////		tween: 500
+//	}, {
+//		display: 'none', // flex
+//		easing: 'easeIn',
+//		delay: 300,
+//		duration: 600,
+//		loop: true,
+//		progress: function() {
+//			if (+new Date - ts < 500) console.log(arguments);
+//		},
+//		mobileHA: true
+//	});
+//	setTimeout(function() {
+//		$.Velocity.debug = false;
+//	}, 2000);
+
+	// $el.velocity({
+	// 	rotateZ: [360, 'linear', 0]
+	// }, {
+	// 	easing: 'linear',
+	// 	duration: 1000,
+	// 	loop: true
+	// });
+
+	$el.css({
+		background: 'url(ruler.jpeg) no-repeat top left',
+		backgroundSize: 'auto 100%',
+		backgroundPosition: '-100px 0'
+	})
+	.velocity({
+		backgroundPositionX: ['100%', -100]
+	}, {
+		duration: 2000,
+		loop: true
+	});
+
+//	$el.velocity('slideDown', 1000).velocity('fadeOut', 1000);
+
+
+
+
+    // 测试其它
+    console.log($.extend({}, {a: 1}, {a: 2}));
+    </script>
+</body>
+</html>
