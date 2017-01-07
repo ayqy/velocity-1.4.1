@@ -3886,6 +3886,12 @@
 						/*************************
 						 Value Transferring
 						 *************************/
+						// 关于属性值的规则
+						// 1.如果入队时发现前面一项也是Velocity创建的 且 当前项是在对应元素动画过程中创建的
+						//   那么可以放心使用前一个call的终值作为初始值，这样就能省去DOM查询，过程叫值转移
+						// 2.如果属性值不是从前一个call拿过来的 且 调用时没有指定初始值（forcefeeding）
+						//   那就只能通过DOM查询得到初始值了
+						// 注意：相反的，reverse和循环内部总是直接进行值转移，从不重复查询DOM
 
 						/* If this queue entry follows a previous Velocity-initiated queue entry *and* if this entry was created
 						 while the element was in the process of being animated by Velocity, then this current call is safe to use
@@ -3900,6 +3906,7 @@
 						/* The per-element isAnimating flag is used to indicate whether it's safe (i.e. the data isn't stale)
 						 to transfer over end values to use as start values. If it's set to true and there is a previous
 						 Velocity call to pull values from, do so. */
+						// isAnimating标识元素正在动画，可以放心做值转移
 						if (data && data.tweensContainer && data.isAnimating === true) {
 							lastTweensContainer = data.tweensContainer;
 						}
@@ -3914,16 +3921,23 @@
 						 or 2) an array in the form of [ endValue, [, easing] [, startValue] ].
 						 The optional third parameter is a forcefed startValue to be used instead of querying the DOM for
 						 the element's current value. Read Velocity's docmentation to learn more about forcefeeding: VelocityJS.org/#forcefeeding */
+						// 用来解析属性数据，并给endValue, easing, startValue填上合适的值
+						// 属性值有2种形式：1.一个值表示终值 2.[ endValue, [, easing] [, startValue] ]形式的数组
+						// 可选的第三个参数是强制给的初始值，用来避免DOM查询获取当前值
+						// 返回[startValue, easing, endValue]
 						var parsePropertyValue = function(valueData, skipResolvingEasing) {
 							var endValue, easing, startValue;
 
 							/* If we have a function as the main argument then resolve it first, in case it returns an array that needs to be split */
+							// 支持属性值为function，这里调用求值方法
+							// ctx为element，参数为元素在集合中的位置, 集合大小
 							if (Type.isFunction(valueData)) {
 								valueData = valueData.call(element, elementArrayIndex, elementsLength);
 							}
 
 							/* Handle the array format, which can be structured as one of three potential overloads:
 							 A) [ endValue, easing, startValue ], B) [ endValue, easing ], or C) [ endValue, startValue ] */
+							// 支持的3种数组格式[ endValue, [, easing] [, startValue] ]，把对应值抽出来
 							if (Type.isArray(valueData)) {
 								/* endValue is always the first item in the array. Don't bother validating endValue's value now
 								 since the ensuing property cycling logic does that. */
@@ -3948,12 +3962,14 @@
 							}
 
 							/* Default to the call's easing if a per-property easing type was not defined. */
+							// 支持属性级的easing
 							if (!skipResolvingEasing) {
 								easing = easing || opts.easing;
 							}
 
 							/* If functions were passed in as values, pass the function the current element as its context,
 							 plus the element's index and the element set's size as arguments. Then, assign the returned value. */
+							// 数组形式的起点终点也可以是function
 							if (Type.isFunction(endValue)) {
 								endValue = endValue.call(element, elementArrayIndex, elementsLength);
 							}
@@ -3963,12 +3979,14 @@
 							}
 
 							/* Allow startValue to be left as undefined to indicate to the ensuing code that its value was not forcefed. */
+							// 终点没有就当是0，起点不给默认值，undefined表示没传forcefeeding
 							return [endValue || 0, easing, startValue];
 						};
 
 						// 进行属性值处理（属性值提取，单位转换，+-*/计算），填充补间数据
 						var fixPropertyValue = function(property, valueData) {
 							/* In case this property is a hook, there are circumstances where we will intend to work on the hook's root property and not the hooked subproperty. */
+							// 取出对应的复合属性，及属性值的初值、终值、easing
 							var rootProperty = CSS.Hooks.getRoot(property),
 									rootPropertyValue = false,
 									/* Parse out endValue, easing, and startValue from the property's data. */
@@ -3986,6 +4004,8 @@
 							 Property support is determined via prefixCheck(), which returns a false flag when no supported is detected. */
 							/* Note: Since SVG elements have some of their properties directly applied as HTML attributes,
 							 there is no way to check for their explicit browser support, and so we skip skip this check for them. */
+							// 跳过不支持的属性（prefixCheck()检测），避免tick里做多余的事情
+							//! 特殊的，SVG元素有些属性是HTML属性，没办法通过prefixCheck()检查其支持性，这里也直接跳过
 							if ((!data || !data.isSVG) && rootProperty !== "tween" && CSS.Names.prefixCheck(rootProperty)[1] === false && CSS.Normalizations.registered[rootProperty] === undefined) {
 								if (Velocity.debug) {
 									console.log("Skipping [" + rootProperty + "] due to a lack of browser support.");
@@ -3996,6 +4016,17 @@
 							/* If the display option is being set to a non-"none" (e.g. "block") and opacity (filter on IE<=8) is being
 							 animated to an endValue of non-zero, the user's intention is to fade in from invisible, thus we forcefeed opacity
 							 a startValue of 0 if its startValue hasn't already been sourced by value transferring or prior forcefeeding. */
+							// 如果opt设置了display或者visibility为非空值 且 动画属性是opacity 且 初始值为空或0 且 终值不为0
+							// 那么猜测是想淡入，把初始值设为0
+							//! 所以就存在猜错的情况，例如：
+							//	$el.css('opacity', 0.5)
+							//	.velocity({
+							//			opacity: 1
+							//		}, {
+							//		display: 'block',
+							//		duration: 2000
+							//	});
+							// 要想从0.5开始的话，必须forcefeeding 0.5，如[1, 0.5]
 							if (((opts.display !== undefined && opts.display !== null && opts.display !== "none") || (opts.visibility !== undefined && opts.visibility !== "hidden")) && /opacity|filter/.test(property) && !startValue && endValue !== 0) {
 								startValue = 0;
 							}
@@ -4003,7 +4034,9 @@
 							/* If values have been transferred from the previous Velocity call, extract the endValue and rootPropertyValue
 							 for all of the current call's properties that were *also* animated in the previous call. */
 							/* Note: Value transferring can optionally be disabled by the user via the _cacheValues option. */
+							// 如果做过值转移，取出上一个call的补间数据中该属性的终值和复合属性值
 							if (opts._cacheValues && lastTweensContainer && lastTweensContainer[property]) {
+								// 用上次的终值作为初值
 								if (startValue === undefined) {
 									startValue = lastTweensContainer[property].endValue + lastTweensContainer[property].unitType;
 								}
@@ -4011,26 +4044,35 @@
 								/* The previous call's rootPropertyValue is extracted from the element's data cache since that's the
 								 instance of rootPropertyValue that gets freshly updated by the tweening process, whereas the rootPropertyValue
 								 attached to the incoming lastTweensContainer is equal to the root property's value prior to any tweening. */
+								//? 为什么能直接用这个，正在动画的东西，该值不是终值啊
+								//? 后面有修改吗
 								rootPropertyValue = data.rootPropertyValueCache[rootProperty];
 								/* If values were not transferred from a previous Velocity call, query the DOM as needed. */
 							} else {
+							// 没做过值转移的话，只能通过DOM查询确定初值
 								/* Handle hooked properties. */
+								// 如果认识这个子属性，就能查到对应的复合属性
 								if (CSS.Hooks.registered[property]) {
 									if (startValue === undefined) {
 										rootPropertyValue = CSS.getPropertyValue(element, rootProperty); /* GET */
 										/* Note: The following getPropertyValue() call does not actually trigger a DOM query;
 										 getPropertyValue() will extract the hook from rootPropertyValue. */
+										// 传了rootPropertyValue，直接从复合属性值中提取子属性值，不再查DOM
 										startValue = CSS.getPropertyValue(element, property, rootPropertyValue);
 										/* If startValue is already defined via forcefeeding, do not query the DOM for the root property's value;
 										 just grab rootProperty's zero-value template from CSS.Hooks. This overwrites the element's actual
 										 root property value (if one is set), but this is acceptable since the primary reason users forcefeed is
 										 to avoid DOM queries, and thus we likewise avoid querying the DOM for the root property's value. */
 									} else {
+									// 如果通过forcefeeding了初值，不查DOM，把空值模板作为rootPropertyValue
+									//!!! 这样做会抹掉其余子属性（该复合属性下不动画的子属性会被搞成空值）
+									//!!! 是forcefeeding的缺点，避免一次DOM查询的代价（不查不知道，就只能假定都是空值）
 										/* Grab this hook's zero-value template, e.g. "0px 0px 0px black". */
 										rootPropertyValue = CSS.Hooks.templates[rootProperty][1];
 									}
 									/* Handle non-hooked properties that haven't already been defined via forcefeeding. */
 								} else if (startValue === undefined) {
+								// 不认识的话，直接查，不管复合属性
 									startValue = CSS.getPropertyValue(element, property); /* GET */
 								}
 							}
@@ -4046,6 +4088,7 @@
 									operator = false;
 
 							/* Separates a property value into its numeric value and its unit type. */
+							// 把数值和单位拆开
 							var separateValue = function(property, value) {
 								var unitType,
 										numericValue;
@@ -4054,6 +4097,7 @@
 										.toString()
 										.toLowerCase()
 										/* Match the unit type at the end of the value. */
+										//!! replace不错，捕获并删除
 										.replace(/[%A-z]+$/, function(match) {
 											/* Grab the unit type. */
 											unitType = match;
@@ -4063,6 +4107,7 @@
 										});
 
 								/* If no unit type was supplied, assign one that is appropriate for this property (e.g. "deg" for rotateZ or "px" for width). */
+								// 没写单位的话，查个单位
 								if (!unitType) {
 									unitType = CSS.Values.getUnitType(property);
 								}
@@ -4070,6 +4115,8 @@
 								return [numericValue, unitType];
 							};
 
+							// 如果初值不等于终值 且 初值终值都是str
+							// 把值和单位解析出来
 							if (startValue !== endValue && Type.isString(startValue) && Type.isString(endValue)) {
 								pattern = "";
 								var iStart = 0, // index in startValue
@@ -4080,12 +4127,16 @@
 										inRGB = 0, // Keep track of being inside an RGB as we can't use fractional values
 										inRGBA = 0; // Keep track of being inside an RGBA as we must pass fractional for the alpha channel
 
+								// 色值预处理（颜色名替换，色值统一成rgb/rgba）
 								startValue = CSS.Hooks.fixColors(startValue);
 								endValue = CSS.Hooks.fixColors(endValue);
+								// 初值终值为什么要这么遍历，条件
+								// 逐字符匹配
 								while (iStart < startValue.length && iEnd < endValue.length) {
 									var cStart = startValue[iStart],
 											cEnd = endValue[iEnd];
 
+									// 数字
 									if (/[\d\.]/.test(cStart) && /[\d\.]/.test(cEnd)) {
 										var tStart = cStart, // temporary character buffer
 												tEnd = cEnd, // temporary character buffer
@@ -4095,6 +4146,7 @@
 										while (++iStart < startValue.length) {
 											cStart = startValue[iStart];
 											if (cStart === dotStart) {
+												//! 避免再匹配到小数点，也就是说此分支只能进来一次
 												dotStart = ".."; // Can never match two characters
 											} else if (!/\d/.test(cStart)) {
 												break;
@@ -4110,24 +4162,34 @@
 											}
 											tEnd += cEnd;
 										}
+										// 取出单位，不合法的话，返回''
 										var uStart = CSS.Hooks.getUnit(startValue, iStart), // temporary unit type
 												uEnd = CSS.Hooks.getUnit(endValue, iEnd); // temporary unit type
 
 										iStart += uStart.length;
 										iEnd += uEnd.length;
+										// 起点终点单位相同
 										if (uStart === uEnd) {
 											// Same units
+											// 值都一样
 											if (tStart === tEnd) {
 												// Same numbers, so just copy over
+												// 起点值单位
 												pattern += tStart + uStart;
 											} else {
+											// 值不一样，记下值
 												// Different numbers, so store them
+												// {起点值的长度!}单位
+												//? 不像正则，应该是一种自定义模式
 												pattern += "{" + aStart.length + (inRGB ? "!" : "") + "}" + uStart;
+												// 记下起点终点值
 												aStart.push(parseFloat(tStart));
 												aEnd.push(parseFloat(tEnd));
 											}
 										} else {
 											// Different units, so put into a "calc(from + to)" and animate each side to/from zero
+										// 单位不同，转calc
+										// 这块处理比较奇怪，转calc之后呢
 											var nStart = parseFloat(tStart),
 													nEnd = parseFloat(tEnd);
 
@@ -4146,22 +4208,27 @@
 											}
 										}
 									} else if (cStart === cEnd) {
+									// 不是数字，但起点终点当前字符相同
 										pattern += cStart;
 										iStart++;
 										iEnd++;
 										// Keep track of being inside a calc()
+										// 匹配'calc('，当inCalc>4时，表示匹配过一个'calc('
 										if (inCalc === 0 && cStart === "c"
 												|| inCalc === 1 && cStart === "a"
 												|| inCalc === 2 && cStart === "l"
 												|| inCalc === 3 && cStart === "c"
+												//? 对于calc(((吗
 												|| inCalc >= 4 && cStart === "("
 												) {
 											inCalc++;
 										} else if ((inCalc && inCalc < 5)
 												|| inCalc >= 4 && cStart === ")" && --inCalc < 5) {
+											// 重置calc计数
 											inCalc = 0;
 										}
 										// Keep track of being inside an rgb() / rgba()
+										// 匹配'rgb('和'rgba('，inRGB>3时匹配过'rgb('，inRGBA<4时匹配过'rgba('
 										if (inRGB === 0 && cStart === "r"
 												|| inRGB === 1 && cStart === "g"
 												|| inRGB === 2 && cStart === "b"
@@ -4186,19 +4253,25 @@
 										break;
 									}
 								}
+								// 长度不同，无法匹配
+								// 比如数值或单位里有别的东西，['2.1.0px', '2pxx']
 								if (iStart !== startValue.length || iEnd !== endValue.length) {
 									if (Velocity.debug) {
 										console.error("Trying to pattern match mis-matched strings [\"" + endValue + "\", \"" + startValue + "\"]");
 									}
 									pattern = undefined;
 								}
+								// 如果匹配过程中有自定义的模式
+								// 说明值是多个，比如rgb/rgba这样的
 								if (pattern) {
 									if (aStart.length) {
 										if (Velocity.debug) {
 											console.log("Pattern found \"" + pattern + "\" -> ", aStart, aEnd, "[" + startValue + "," + endValue + "]");
 										}
+										// 先把数组直接作为值，后续肯定要处理
 										startValue = aStart;
 										endValue = aEnd;
+										// 单位为空
 										endValueUnitType = startValueUnitType = "";
 									} else {
 										pattern = undefined;
@@ -4206,14 +4279,18 @@
 								}
 							}
 
+							// 没有自定义模式的话，把数值和单位分开（不存在值为数组的情况，应该是后面才处理）
 							if (!pattern) {
 								/* Separate startValue. */
+								// 处理起点
 								separatedValue = separateValue(property, startValue);
 								startValue = separatedValue[0];
 								startValueUnitType = separatedValue[1];
 
 								/* Separate endValue, and extract a value operator (e.g. "+=", "-=") if one exists. */
+								// 终点比较麻烦，要支持+=, -=, *=, /=，先提取出来
 								separatedValue = separateValue(property, endValue);
+								// 记下操作符，并删掉
 								endValue = separatedValue[0].replace(/^([+-\/*])=/, function(match, subMatch) {
 									operator = subMatch;
 
@@ -4223,6 +4300,7 @@
 								endValueUnitType = separatedValue[1];
 
 								/* Parse float values from endValue and startValue. Default to 0 if NaN is returned. */
+								// 转数字，NaN的话强制0
 								startValue = parseFloat(startValue) || 0;
 								endValue = parseFloat(endValue) || 0;
 
@@ -4231,9 +4309,13 @@
 								 ***************************************/
 
 								/* Custom support for properties that don't actually accept the % unit type, but where pollyfilling is trivial and relatively foolproof. */
+								// 终点单位是百分比的话，转成对应单位
 								if (endValueUnitType === "%") {
 									/* A %-value fontSize/lineHeight is relative to the parent's fontSize (as opposed to the parent's dimensions),
 									 which is identical to the em unit's behavior, so we piggyback off of that. */
+									// fz和lh的百分比转em
+									// scale转小数，去掉单位
+									// RGB分量转小数再乘以255，去掉单位
 									if (/^(fontSize|lineHeight)$/.test(property)) {
 										/* Convert % into an em decimal value. */
 										endValue = endValue / 100;
@@ -4253,8 +4335,14 @@
 							/***************************
 							 Unit Ratio Calculation
 							 ***************************/
-							// 单位转换
-							// 百分比、rem等等，都转px
+							// 单位转换，起点终点单位要统一，不然没法插值
+							// 做2件事：
+							// 1.计算%/em/rem/vh/vw相对px的比率
+							// 2.终点单位不变，转换起点单位
+							// 通过给目标节点插入兄弟节点计算单位转换比率
+							// 复制定位属性，用目标单位来设置值，然后比较返回的px值
+							// 注意：即使动画只需要一种单位类，这里也会一次性计算出所有的
+							// 出于计算成本考虑，避免重复计算造成布局抖动layout thrashing
 
 							/* When queried, the browser returns (most) CSS property values in pixels. Therefore, if an endValue with a unit type of
 							 %, em, or rem is animated toward, startValue must be converted from pixels into the same unit type as endValue in order
@@ -4273,22 +4361,29 @@
 								/************************
 								 Same Ratio Checks
 								 ************************/
+								// 检查能不能直接用上一次计算结果
+								// 上一次是lastXXX，调用级的变量，一个call一份
+								// 假定满足局部性原理，假设一个call里的元素有关联
 
 								/* The properties below are used to determine whether the element differs sufficiently from this call's
 								 previously iterated element to also differ in its unit conversion ratios. If the properties match up with those
 								 of the prior element, the prior element's conversion ratios are used. Like most optimizations in Velocity,
 								 this is done to minimize DOM querying. */
+								// 根据parent、pos和fz来判断能不能用之前的
 								var sameRatioIndicators = {
 									myParent: element.parentNode || document.body, /* GET */
 									position: CSS.getPropertyValue(element, "position"), /* GET */
 									fontSize: CSS.getPropertyValue(element, "fontSize") /* GET */
 								},
 										/* Determine if the same % ratio can be used. % is based on the element's position value and its parent's width and height dimensions. */
+										// 百分比取决于pos、parent
 										samePercentRatio = ((sameRatioIndicators.position === callUnitConversionData.lastPosition) && (sameRatioIndicators.myParent === callUnitConversionData.lastParent)),
 										/* Determine if the same em ratio can be used. em is relative to the element's fontSize. */
+										// em取决于fz
 										sameEmRatio = (sameRatioIndicators.fontSize === callUnitConversionData.lastFontSize);
 
 								/* Store these ratio indicators call-wide for the next element to compare against. */
+								// 记下lastXXX，callUnitConversionData是调用级变量
 								callUnitConversionData.lastParent = sameRatioIndicators.myParent;
 								callUnitConversionData.lastPosition = sameRatioIndicators.position;
 								callUnitConversionData.lastFontSize = sameRatioIndicators.fontSize;
@@ -4299,39 +4394,54 @@
 
 								/* Note: IE8 rounds to the nearest pixel when returning CSS values, thus we perform conversions using a measurement
 								 of 100 (instead of 1) to give our ratios a precision of at least 2 decimal values. */
+								// IE8对于小数像素值会做舍入，所以不查1%，而查100%
 								var measurement = 100,
 										unitRatios = {};
 
+								// 百分比或em不能用之前的
 								if (!sameEmRatio || !samePercentRatio) {
+									// 创建test div/svg
 									var dummy = data && data.isSVG ? document.createElementNS("http://www.w3.org/2000/svg", "rect") : document.createElement("div");
 
+									// 创建二级缓存对象
 									Velocity.init(dummy);
+									// 作为兄弟节点挂上
 									sameRatioIndicators.myParent.appendChild(dummy);
 
+									// 去掉级联ov和bxz，同样因为w/h受min-/max-影响，也重置一遍
 									/* To accurately and consistently calculate conversion ratios, the element's cascaded overflow and box-sizing are stripped.
 									 Similarly, since width/height can be artificially constrained by their min-/max- equivalents, these are controlled for as well. */
 									/* Note: Overflow must be also be controlled for per-axis since the overflow property overwrites its per-axis values. */
+									// ov必须分轴控制，因为ovh覆盖了每个轴的属性
 									$.each(["overflow", "overflowX", "overflowY"], function(i, property) {
 										Velocity.CSS.setPropertyValue(dummy, property, "hidden");
 									});
+									// 复制目标节点的pos, fz
 									Velocity.CSS.setPropertyValue(dummy, "position", sameRatioIndicators.position);
 									Velocity.CSS.setPropertyValue(dummy, "fontSize", sameRatioIndicators.fontSize);
+									// 设置bxz: content-box
 									Velocity.CSS.setPropertyValue(dummy, "boxSizing", "content-box");
 
 									/* width and height act as our proxy properties for measuring the horizontal and vertical % ratios. */
+									// 设置宽高100%，包括min-, max-
 									$.each(["minWidth", "maxWidth", "width", "minHeight", "maxHeight", "height"], function(i, property) {
 										Velocity.CSS.setPropertyValue(dummy, property, measurement + "%");
 									});
 									/* paddingLeft arbitrarily acts as our proxy property for the em ratio. */
+									// 设置pl: 100em
 									Velocity.CSS.setPropertyValue(dummy, "paddingLeft", measurement + "em");
 
 									/* Divide the returned value by the measurement to get the ratio between 1% and 1px. Default to 1 since working with 0 can produce Infinite. */
+									// 查DOM取w, h, pl，算单位比率
+									//! 没有宽高的话，比率是0.01
 									unitRatios.percentToPxWidth = callUnitConversionData.lastPercentToPxWidth = (parseFloat(CSS.getPropertyValue(dummy, "width", null, true)) || 1) / measurement; /* GET */
 									unitRatios.percentToPxHeight = callUnitConversionData.lastPercentToPxHeight = (parseFloat(CSS.getPropertyValue(dummy, "height", null, true)) || 1) / measurement; /* GET */
 									unitRatios.emToPx = callUnitConversionData.lastEmToPx = (parseFloat(CSS.getPropertyValue(dummy, "paddingLeft")) || 1) / measurement; /* GET */
 
+									// 删掉test元素
 									sameRatioIndicators.myParent.removeChild(dummy);
 								} else {
+									// 直接用lastXXX
 									unitRatios.emToPx = callUnitConversionData.lastEmToPx;
 									unitRatios.percentToPxWidth = callUnitConversionData.lastPercentToPxWidth;
 									unitRatios.percentToPxHeight = callUnitConversionData.lastPercentToPxHeight;
@@ -4340,6 +4450,9 @@
 								/***************************
 								 Element-Agnostic Units
 								 ***************************/
+								// 元素无关的单位，rem, vw, vh
+								// 每个call算一次
+								//!! 没必要啊，全局算一次就行了
 
 								/* Whereas % and em ratios are determined on a per-element basis, the rem unit only needs to be checked
 								 once per call since it's exclusively dependant upon document.body's fontSize. If this is the first time
@@ -4351,11 +4464,16 @@
 								}
 
 								/* Similarly, viewport units are %-relative to the window's inner dimensions. */
+								//!!! 计算用的window.innerWidth/Height
+								//!!! 在5s下不准，有时会取到极大值
+								//!!! 所以动画属性单位不要用vw和vh
+								//!!! 非要用的话，改为document.documentElement.clientWidth/Height
 								if (callUnitConversionData.vwToPx === null) {
 									callUnitConversionData.vwToPx = parseFloat(window.innerWidth) / 100; /* GET */
 									callUnitConversionData.vhToPx = parseFloat(window.innerHeight) / 100; /* GET */
 								}
 
+								//
 								unitRatios.remToPx = callUnitConversionData.remToPx;
 								unitRatios.vwToPx = callUnitConversionData.vwToPx;
 								unitRatios.vhToPx = callUnitConversionData.vhToPx;
@@ -4372,6 +4490,7 @@
 							// 做单位转换
 
 							/* The * and / operators, which are not passed in with an associated unit, inherently use startValue's unit. Skip value and unit conversion. */
+							// 乘法除法不传入单位，所以用起点单位
 							if (/[\/*]/.test(operator)) {
 								endValueUnitType = startValueUnitType;
 								/* If startValue and endValue differ in unit type, convert startValue into the same unit type as endValue so that if endValueUnitType
@@ -4380,23 +4499,35 @@
 								 would become stale if the original unit being animated toward was relative and the underlying metrics change during the animation. */
 								/* Since 0 is 0 in any unit type, no conversion is necessary when startValue is 0 -- we just start at 0 with endValueUnitType. */
 							} else if ((startValueUnitType !== endValueUnitType) && startValue !== 0) {
+							// 起点终点单位不同 且 起点不为0的话，转换起点单位
+							//! 这里以终点单位为准，而不是统一px
+							//! 因为相对单位(%, em, rem)依赖参照值，如果动画过程中参照值变了，px就有问题了
 								/* Unit conversion is also skipped when endValue is 0, but *startValueUnitType* must be used for tween values to remain accurate. */
 								/* Note: Skipping unit conversion here means that if endValueUnitType was originally a relative unit, the animation won't relatively
 								 match the underlying metrics if they change, but this is acceptable since we're animating toward invisibility instead of toward visibility,
 								 which remains past the point of the animation's completion. */
+								// 0不存在单位的问题，直接统一成非0值的单位
 								if (endValue === 0) {
 									endValueUnitType = startValueUnitType;
 								} else {
+								// 转换单位
 									/* By this point, we cannot avoid unit conversion (it's undesirable since it causes layout thrashing).
 									 If we haven't already, we trigger calculateUnitRatios(), which runs once per element per call. */
+									// 算转换比率（没算过的话）
 									elementUnitConversionData = elementUnitConversionData || calculateUnitRatios();
 
 									/* The following RegEx matches CSS properties that have their % values measured relative to the x-axis. */
 									/* Note: W3C spec mandates that all of margin and padding's properties (even top and bottom) are %-relative to the *width* of the parent element. */
+									// 判断相对w还是h axis='x'/'y'
+									//! margin/padding无论上下左右都是些相对w的，以及含有'X'的属性，都是相对w的
 									var axis = (/margin|padding|left|right|width|text|word|letter/i.test(property) || /X$/.test(property) || property === "x") ? "x" : "y";
 
 									/* In order to avoid generating n^2 bespoke conversion functions, unit conversion is a two-step process:
 									 1) Convert startValue into pixels. 2) Convert this new pixel value into endValue's unit type. */
+									// 单位转换具体步骤：
+									// 1.起点转px
+									// 2.把得到的px值转终点单位值
+									//! 把px当作单位1，就能避免搞出一大堆方法，比如em2%, %2em, rem2em...
 									switch (startValueUnitType) {
 										case "%":
 											/* Note: translateX and translateY are the only properties that are %-relative to an element's own dimensions -- not its parent's dimensions.
@@ -4410,10 +4541,12 @@
 											break;
 
 										default:
+											// 其它单位都以px为单位1
 											startValue *= elementUnitConversionData[startValueUnitType + "ToPx"];
 									}
 
 									/* Invert the px ratios to convert into to the target unit. */
+									// 以终点单位为准，算起点值
 									switch (endValueUnitType) {
 										case "%":
 											startValue *= 1 / (axis === "x" ? elementUnitConversionData.percentToPxWidth : elementUnitConversionData.percentToPxHeight);
@@ -4448,6 +4581,8 @@
 									endValue = startValue - endValue;
 									break;
 
+								// 乘法除法的endValue没有单位，表示因数/除数
+								// 前面对于乘法除法，终点用了起点单位
 								case "*":
 									endValue = startValue * endValue;
 									break;
@@ -4494,12 +4629,15 @@
 
 							/* Find shorthand color properties that have been passed a hex string. */
 							/* Would be quicker to use CSS.Lists.colors.includes() if possible */
+							// 如果是值为color类型的属性转rgb
+							// 因为rgb是多个值，特殊处理，拆出dataArray，再fixPropertyValue()
 							if (CSS.Lists.colors.indexOf(propertyName) >= 0) {
 								/* Parse the value data for each shorthand. */
 								var endValue = valueData[0],
 										easing = valueData[1],
 										startValue = valueData[2];
 
+								// 终点是16进制的话，转rgb
 								if (CSS.RegEx.isHex.test(endValue)) {
 									/* Convert the hex strings into their RGB component arrays. */
 									var colorComponents = ["Red", "Green", "Blue"],
@@ -4518,16 +4656,19 @@
 											dataArray.push(startValueRGB[i]);
 										}
 
+										// 从rgb()提取出值，填充补间数据
 										fixPropertyValue(propertyName + colorComponents[i], dataArray);
 									}
 									/* If we have replaced a shortcut color value then don't update the standard property name */
 									continue;
 								}
 							}
+							// 填充补间数据
 							fixPropertyValue(propertyName, valueData);
 						}
 
 						/* Along with its property data, store a reference to the element itself onto tweensContainer. */
+						// 把元素挂到补间数据上
 						tweensContainer.element = element;
 					}
 
@@ -4989,6 +5130,8 @@
 									currentValue = tween.pattern.replace(/{(\d+)(!)?}/g, patternReplace);
 								} else if (percentComplete === 1) {
 								// 已完成，手动赋值，确保终点准确（不受计算精度影响）
+								//!!! 不应该手动赋值终点了，因为sin之类的，终点是0
+								//!!! 强制赋值就错了
 									/* If this is the last tick pass (if we've reached 100% completion for this tween),
 									 ensure that currentValue is explicitly set to its target endValue so that it's not subjected to any rounding. */
 									currentValue = tween.endValue;
